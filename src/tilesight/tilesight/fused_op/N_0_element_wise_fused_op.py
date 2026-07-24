@@ -1,0 +1,63 @@
+# 文件名: N_0_element_wise_op.py
+import numpy as np
+import math
+
+def calculate_N_0_elementwise_resource_utilization(op_shape,tb_shape,dim_threads,bytes_per_num, arch,mem_levels):
+    # ret=calculate_N_N_elementwise_resource_utilization([20480,20480],[10,160],[10,10], 4,chip,conv_levels)
+
+    # m,n=op_shape
+    # tb_m,tb_n=tb_shape
+    # m_thread,n_thread=dim_threads
+
+    DDR_non_ideal_para=1.0 #Unmerged fragmented accesses will be scaled to sector (32bytes) as the smallest unit
+    REG_spill_para=1.1 # just like the last one, something we don't know clearly about ncu
+
+    thread_per_tb=np.prod(dim_threads)
+    thread_tiles=[math.ceil(tb_dim / thread_dim) for tb_dim, thread_dim in zip(tb_shape, dim_threads)]
+    # thread_m=math.ceil(tb_m/m_thread)
+    # thread_n=math.ceil(tb_n/n_thread)
+
+    l2_hit_rate=0
+    grids = [math.ceil(dim / tb_dim) for dim, tb_dim in zip(op_shape, tb_shape)]
+    # example:
+    #     mem_levels = {
+    #     'in1': '[1,1,1]', for ddr
+    #     'in2': '[0,1,1]', for smem
+    #     'out1': [0,0,1],  for reg
+    # }
+
+    in1_level = mem_levels['in1']
+    out1_level = mem_levels['out1']
+
+    l2_read_io=np.prod(op_shape)*in1_level[0]*bytes_per_num
+    l2_store_io=np.prod(op_shape)*bytes_per_num*out1_level[0]
+
+    ddr_io=l2_read_io*(1-l2_hit_rate)+l2_store_io
+    ddr_io=ddr_io*DDR_non_ideal_para
+
+    if (arch.core=="A100" or arch.core=="H100" or arch.core=="B200"):
+        #a100 with special two-part l2 cache structure
+        l2_io=l2_read_io*(l2_hit_rate)+l2_read_io*(1-l2_hit_rate)*2+l2_store_io*2
+    else:
+        l2_io=l2_read_io+l2_store_io
+
+    smem_footprint=np.prod(tb_shape)*(out1_level[1]-out1_level[0])*bytes_per_num
+
+    smem_l1_io=(np.prod(op_shape)*in1_level[1])*bytes_per_num
+    smem_l1_io+=(np.prod(op_shape)*out1_level[1])*bytes_per_num
+
+    # 3 means 2 input + 1 ouput 
+    reg_footprint=math.ceil(np.prod(thread_tiles)*(in1_level[1]+1)*REG_spill_para)
+
+    overheads=(32 / thread_per_tb if thread_per_tb <= 32 else
+          128 / thread_per_tb if thread_per_tb <= 128 else
+          256 / thread_per_tb if thread_per_tb <= 256 else
+          384 / thread_per_tb if thread_per_tb <= 384 else
+          512 / thread_per_tb)
+    # a+b, FADD also uses FMA pipe, which will also occupy one cyle
+    compute_flops=2*np.prod(op_shape)*overheads
+    smem_l1_io=smem_l1_io*overheads
+
+    ddr_read_io=l2_read_io*(1-l2_hit_rate)
+
+    return ddr_io, l2_hit_rate, l2_io, smem_footprint, smem_l1_io, reg_footprint, compute_flops, ddr_read_io, l2_read_io
