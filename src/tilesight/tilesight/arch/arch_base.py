@@ -59,6 +59,7 @@ class Arch:
         self.compute_max_util=0.9
 
         self.max_blocks_per_sm = 24  # hardware limit, overridden per arch
+        self.wavefront_size = 32  # threads per warp/wave (NVIDIA default)
         self.use_tensor_core_resource_model = False
         self.apply_dram_wave_quantization = False
 

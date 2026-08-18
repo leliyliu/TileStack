@@ -32,18 +32,17 @@ def _apply_wave_bytes_correction(io_val, arch):
     return io_val
 
 
-def _compute_thread_overhead(thread_per_tb):
-    """计算线程数不足导致的计算开销。"""
-    if thread_per_tb <= 32:
-        return 32 / thread_per_tb
-    elif thread_per_tb <= 128:
-        return 128 / thread_per_tb
-    elif thread_per_tb <= 256:
-        return 256 / thread_per_tb
-    elif thread_per_tb <= 384:
-        return 384 / thread_per_tb
-    else:
-        return 1
+def _compute_thread_overhead(thread_per_tb, arch=None):
+    """计算线程数不足导致的计算开销。
+
+    量化粒度由架构 wavefront 决定: NVIDIA 32 → 32/128/256/384 档,
+    64 线程 wavefront 架构 (AMD/沐曦) → 64/256/512/768 档。
+    """
+    w = getattr(arch, 'wavefront_size', 32) if arch is not None else 32
+    for quantum in (w, 4 * w, 8 * w, 12 * w):
+        if thread_per_tb <= quantum:
+            return quantum / thread_per_tb
+    return 1
 
 
 def _build_result(tile_res, tiles_per_sm, arch, l2_hit_rate, data_bytes=4):
@@ -206,7 +205,7 @@ def calculate_N_0_general_reduce_pipeline_wave(
     per_iter_smem = 2 * per_iter_l2_read  # ldg + sts
 
     # lds (load from smem for compute)
-    overheads = _compute_thread_overhead(thread_per_tb)
+    overheads = _compute_thread_overhead(thread_per_tb, arch)
 
     # compute_at 决定 lds 的模式
     current_in1_thread_shape = list(in1_thread_shape)
@@ -402,7 +401,7 @@ def calculate_general_reduce_pipeline_wave(
         per_iter_l2 = per_iter_l2_read
 
     per_iter_smem = 2 * per_iter_l2_read
-    overheads = _compute_thread_overhead(thread_per_tb)
+    overheads = _compute_thread_overhead(thread_per_tb, arch)
     cur_rs = list(reduction_step); cur_ram = list(reduction_axis_mapping)
 
     if compute_at == -1:
@@ -493,7 +492,7 @@ def calculate_general_inter_thread_reduce_pipeline_wave(
         per_iter_l2 = per_iter_l2_read
 
     per_iter_smem = 2 * per_iter_l2_read
-    overheads = _compute_thread_overhead(thread_per_tb)
+    overheads = _compute_thread_overhead(thread_per_tb, arch)
     cur_rs = list(reduction_step); cur_ram = list(reduction_axis_mapping)
 
     if compute_at == -1:
@@ -652,7 +651,7 @@ def calculate_N_0_general_inter_thread_reduce_pipeline_wave(
 
     per_iter_smem = 2 * per_iter_l2_read  # ldg + sts
 
-    overheads = _compute_thread_overhead(thread_per_tb)
+    overheads = _compute_thread_overhead(thread_per_tb, arch)
 
     # compute_at handling
     current_in1_thread_shape = list(in1_thread_shape)

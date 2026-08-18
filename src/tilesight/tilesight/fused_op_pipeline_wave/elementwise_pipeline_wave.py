@@ -35,18 +35,17 @@ def _apply_wave_bytes_correction(io_val, arch):
     return io_val
 
 
-def _compute_thread_overhead(thread_per_tb):
-    """计算线程数不足导致的计算开销。"""
-    if thread_per_tb <= 32:
-        return 32 / thread_per_tb
-    elif thread_per_tb <= 128:
-        return 128 / thread_per_tb
-    elif thread_per_tb <= 256:
-        return 256 / thread_per_tb
-    elif thread_per_tb <= 384:
-        return 384 / thread_per_tb
-    else:
-        return 1
+def _compute_thread_overhead(thread_per_tb, arch=None):
+    """计算线程数不足导致的计算开销。
+
+    量化粒度由架构 wavefront 决定: NVIDIA 32 → 32/128/256/384 档,
+    64 线程 wavefront 架构 (AMD/沐曦) → 64/256/512/768 档。
+    """
+    w = getattr(arch, 'wavefront_size', 32) if arch is not None else 32
+    for quantum in (w, 4 * w, 8 * w, 12 * w):
+        if thread_per_tb <= quantum:
+            return quantum / thread_per_tb
+    return 1
 
 
 def _build_result(tile_res, tiles_per_sm, arch, l2_hit_rate, data_bytes=4):
@@ -131,7 +130,7 @@ def calculate_N_0_elementwise_pipeline_wave(op_shape, tb_shape, dim_threads,
     per_tile_smem = (per_tile_elements * in1_level[1] * in1_level[-1]
                      + per_tile_elements * out1_level[1] * out1_level[-1])
 
-    overheads = _compute_thread_overhead(thread_per_tb)
+    overheads = _compute_thread_overhead(thread_per_tb, arch)
     per_tile_compute = 2 * per_tile_elements * overheads * num_ops
     per_tile_smem *= overheads
 
@@ -233,7 +232,7 @@ def calculate_N_1_elementwise_pipeline_wave(in1_shape, in2_shape, in1_tb_shape,
                      + thread_per_tb * np.prod(in2_thread_shape) * in2_level[1] * in2_level[-1]
                      + np.prod(in1_tb_shape) * out1_level[1] * out1_level[-1])
 
-    overheads = _compute_thread_overhead(thread_per_tb)
+    overheads = _compute_thread_overhead(thread_per_tb, arch)
     per_tile_compute = 2 * np.prod(in1_tb_shape) * overheads * num_ops
     per_tile_smem *= overheads
 
@@ -324,7 +323,7 @@ def calculate_N_N_elementwise_pipeline_wave(op_shape, tb_shape, dim_threads,
                      + per_tile_elements * in2_level[1] * in2_level[-1]
                      + per_tile_elements * out1_level[1] * out1_level[-1])
 
-    overheads = _compute_thread_overhead(thread_per_tb)
+    overheads = _compute_thread_overhead(thread_per_tb, arch)
     per_tile_compute = 2 * per_tile_elements * overheads * num_ops
     per_tile_smem *= overheads
 

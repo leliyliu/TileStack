@@ -110,6 +110,33 @@ class TestTensorCoreShapes:
             arch.get_tensor_core_minimum_ptx(bytes=0.5)
 
 
+class TestWavefrontSemantics:
+    """建模层必须按 arch.wavefront_size 计算, 而非硬编码 32。"""
+
+    def test_arch_base_default_32(self):
+        # NVIDIA 卡无自定义属性 → 基类默认 32, 行为不变
+        from tilesight.arch.arch_base import Arch
+        assert Arch().wavefront_size == 32
+
+    def test_occupancy_uses_wavefront_size(self, arch):
+        # C550: 64 线程/warp; 512KB regfile, reg_footprint=64 (per-warp 4B reg 数),
+        # warps_per_block=4 (256 线程):
+        #   per-block = 64 * 4B * 64线程 * 4warp = 64KB → 512KB/64KB = 8 blocks
+        from tilesight.fused_op_pipeline_wave.occupancy import compute_occupancy
+        tiles = compute_occupancy(smem_footprint=0, reg_footprint=64,
+                                  warps_per_block=4, arch=arch)
+        assert tiles == 8
+
+    def test_thread_overhead_uses_wavefront_size(self, arch):
+        # C550 wavefront=64: 64 线程无开销, 32 线程有 2x 开销
+        from tilesight.fused_op_pipeline_wave.elementwise_pipeline_wave import (
+            _compute_thread_overhead,
+        )
+        w = arch.wavefront_size
+        assert _compute_thread_overhead(w, arch) == 1.0
+        assert _compute_thread_overhead(w // 2, arch) == 2.0
+
+
 class TestMatmulModelSmoke:
     """端到端冒烟: 8192^3 FP16 GEMM 建模 vs 实测。
 

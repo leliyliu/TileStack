@@ -33,14 +33,15 @@ def compute_occupancy(smem_footprint, reg_footprint, warps_per_block, arch, mma_
     # Constraint 2: registers
     # reg_footprint 是每个 warp 使用的 4-byte 寄存器数
     # register_capacity_per_sm 是 bytes
-    # 每 block 寄存器用量 (bytes) = reg_footprint * 4 * 32 * warps_per_block
-    #   其中 32 = threads_per_warp, 4 = bytes_per_register
+    # 每 block 寄存器用量 (bytes) = reg_footprint * 4 * threads_per_warp * warps_per_block
+    #   threads_per_warp 由架构决定: NVIDIA=32, AMD/沐曦 wavefront=64
     # 但在现有代码中 reg_footprint 的单位因 op 类型而异：
     #   matmul: 已除以 32 和 4（是 register count per thread 的近似）
     #   elementwise: 类似
     # 使用保守估计: reg_footprint 作为 per-warp 的 4B register 数
     if reg_footprint > 0 and warps_per_block > 0:
-        reg_per_block_bytes = reg_footprint * 4 * 32 * warps_per_block
+        threads_per_warp = getattr(arch, 'wavefront_size', 32)
+        reg_per_block_bytes = reg_footprint * 4 * threads_per_warp * warps_per_block
         reg_limit = int(arch.register_capacity_per_sm / reg_per_block_bytes)
     else:
         reg_limit = max_blocks
