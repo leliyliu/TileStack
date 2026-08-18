@@ -134,6 +134,31 @@ $$\text{误差} = \frac{|\text{建模延迟} - \text{实测持续延迟}|}{\text
 
 **遗留事项必须显式列出**：未实测字段、走通用分支的 op 层硬编码、未表达的架构特性。
 
+## 阶段 5.5：算子级验证（GEMM 之外的代表性算子）
+
+仅意 GEMM 验证不足以支撑真实负载建模，需扩展三类代表性算子并校准两个 per-arch 常数：
+
+| 算子 | 建模方式 | 实测基准 | C550 实绩 |
+|---|---|---|---|
+| FlashAttention prefill | 三段拆解：QK^T + softmax + PV（复用 matmul pipeline wave；PV 的 scores 驻留 WSM 不计 DDR 读） | `flash_attn_func`，全/causal × 多 seq | 6 点误差 0.5–10.4% |
+| RMSNorm | 单遍 smem 缓冲：IO=读 N 份+写 1 份，向量为底 | **compiled 良实现**（勿用原生，可能是现低效） | 4 点 0.3–5.7% |
+| 融合链（residual+RMSNorm / MatMul→RMSNorm） | 串行 N 份流量 vs 融合 N-k 份 | compiled 串行 vs compiled 融合（公平基线） | 收益比 1.39x vs 实测 1.33x |
+
+**需标定的 per-arch 常数**（均需多测点交叉验证，禁止单点拟合）：
+
+| 常数 | 含义 | 标定方法 |
+|---|---|---|
+| `elementwise_ddr_eff` | 含行规约 kernel 的有效带宽系数 | RMSNorm 多 shape 实测带宽 / ddr_bandwidth（C550=0.65） |
+| `fa_tc_eff` | FA 有效 TC 算力系数 | 两端口径夹逼：eff=1 与 eff=实测FA/GEMM直比 各算一遍，各测点线性交点即为取值（C550：交点 0.735–0.78 取 0.75） |
+
+**语义检查项**（接入非 NVIDIA GPU 时必须过一遍，C550 实践中全部踩过）：
+
+- [ ] 寄存器占用计算是否硬编码 32 线程/warp（`occupancy.py`）
+- [ ] 线程开销量化档位是否随 wavefront 大小（`elementwise/reduce_pipeline_wave`）
+- [ ] batch GEMM 的 batch 维是否参与 wave 全 SM 调度（`matmul_pipeline_wave`）
+- [ ] 中间张量驻留 WSM 的段（如 FA 的 scores）是否被误计为 DDR 流量
+- [ ] 原生框架算子实现是否低效（用 compiled/手写良实现作 ground truth，否则会把实现问题谝入模型误差）
+
 ---
 
 ## 已知限制与进阶路线

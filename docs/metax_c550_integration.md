@@ -147,15 +147,58 @@ PYTHONPATH=src/tilesight python -m pytest tests/test_metax_c550.py -v
 - spec 口径 4.01 ms 恰好对齐峰值 4.00 ms（满利用率理论值），两个口径行为符合预期
 - 16/16 测试通过
 
-## 7. 遗留事项
+## 7. 算子级验证（第二轮，2026-08-19）
+
+接入后进一步用 FA / RMSNorm / 融合链验证建模精度，并修复两处建模层 NVIDIA 语义硬编码。
+
+### 6.1 建模层语义修复（对所有架构生效）
+
+| 修复 | 位置 | 影响 |
+|---|---|---|
+| 寄存器占用硬编码 32 线程/warp | `occupancy.py:41` → `arch.wavefront_size` | C550 寄存器占用此前低估 2 倍 |
+| 线程开销量化档 32/128/256/384 | `elementwise/reduce_pipeline_wave.py` | C550 → 64/256/512/768 |
+| batch GEMM 未参与 wave 全 SM 调度 | `matmul_pipeline_wave.py`（batch 折入 total_tiles） | 小 grid×大 batch 高估最高 5x（FA PV 段） |
+
+### 6.2 实测与建模对比（bench/results_c550_ops.json）
+
+**FlashAttention prefill**（B=8,H=32,D=128,bf16，三段拆解 QK^T/softmax/PV）：
+
+| 场景 | 实测 ms | 建模 ms | 误差 |
+|---|---|---|---|
+| full S=2048/4096/8192 | 3.41 / 13.74 / 57.24 | 3.49 / 13.81 / 55.1 | 2.2% / 0.5% / 3.7% |
+| causal S=2048/4096/8192 | 1.89 / 7.70 / 29.38 | 2.04 / 8.50 / 27.56 | 7.9% / 10.4% / 6.2% |
+
+**RMSNorm**（compiled 良实现）：4 个 shape 误差 0.3%–5.7%。
+
+**融合收益**（residual+RMSNorm）：串行 0.142ms / 融合 0.107ms（1.33x），建模 1.39x（4.6%）；MatMul→RMSNorm 链误差 <15%。
+
+### 6.3 新增 per-arch 校准常数（均多测点交叉验证）
+
+| 常数 | 值 | 含义 | 依据 |
+|---|---|---|---|
+| `elementwise_ddr_eff` | 0.65 | 含行规约 kernel 有效带宽（0.93 TB/s / 1430） | RMSNorm 4 测点 |
+| `fa_tc_eff` | 0.75 | FA 有效 TC 算力系数（online softmax 等固有开销） | 两端口径夹逼，6 测点交点 0.735–0.78 |
+
+### 6.4 重要实测发现
+
+1. **原生 `torch.nn.RMSNorm` 在沐曦上低效 15x**（0.731ms vs compiled 0.073ms，~92 GB/s）——模型上限可暴露此类实现问题
+2. 纯 elementwise（add 1.35 TB/s）与含规约 kernel（0.93 TB/s）带宽效率显著不同，建模需区分
+3. FA 有效算力 150–161 TFLOPS 高度一致（6 测点），为 GEMM 峰值 275 的 56%（实测值），模型经 eff 校准后误差 ≤10.4%
+
+## 8. 遗留事项
 
 1. `ddr_wave_bytes`、`fp64`、`int8` 未经实测校准（已在字段注释中标注）
 2. L2 带宽为推算值；如需精确可用 L2 resident GEMM（K 小 M/N 大）微基准实测
 3. op 层 38 处 NVIDIA 硬编码分支（`docs/expansion_feasibility.md`）未处理——C550 走通用
    分支可用，专用分支可进一步提升精度（进阶阶段，见标准化流程文档）
-4. 单发射单元的 5 发射口互斥（MMA 与向量 ALU 共槽）未在建模层显式表达——现有
-   pipeline_overlap 模型按「各单元独立流水」取 max，对 GEMM 类负载影响小，对 MMA+ALU
-   混合 kernel 可能高估
+4. 单发射单元的 5 发射口互斥（MMA 与向量 ALU 共槽）未在建模层显式表达——其开销
+   目前被 fa_tc_eff (0.75) 经验性吸收；显式建模需在 pipeline_overlap 增加共槽语义，
+   留待后续架构（如接入摩尔线程时）一并处理
+5. FA decode (q_len=1) 尚未建模（实测 0.19-0.69ms 已入库 bench/results_c550_ops.json）；
+   decode 为 memory-bound 的 KV 读取，适合用 elementwise+reduce 原语组合，待有更多
+   shape 需求时补
+6. 校准常数的可迁移性：elementwise_ddr_eff / fa_tc_eff 为 C550 专属；新国产卡接入时
+   按 docs/domestic_gpu_integration_guide.md 阶段 5.5 重新实测标定
 
 ## 附录：profiling 脚本
 
