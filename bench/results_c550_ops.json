@@ -1,0 +1,21 @@
+{
+  "env": {
+    "torch": "2.8.0+metax3.7.1.17.dsv4",
+    "date": "2026-08-19",
+    "host": "muxi-01 (CX7Group1-host-050), container dsv4-d-50, GPU0"
+  },
+  "fa_prefill_ms": { "2048": 3.4087, "4096": 13.7377, "8192": 57.2449 },
+  "fa_prefill_causal_ms": { "2048": 1.8919, "4096": 7.703, "8192": 29.3811 },
+  "fa_decode_ms": { "2048": 0.1888, "4096": 0.3552, "8192": 0.69 },
+  "rmsnorm_native_ms": { "4096": 0.731, "8192": 1.3657 },
+  "rmsnorm_compiled_ms": { "4096_rows4096": 0.0731, "4096_rows16384": 0.2681, "8192_rows4096": 0.1374, "8192_rows16384": 0.5181 },
+  "residual_rmsnorm_serial_ms": 0.7721,
+  "residual_rmsnorm_fused_ms": 0.1067,
+  "matmul_rmsnorm_ms": 1.2118,
+  "matmul_only_4096_bf16_ms": 0.5109,
+  "notes": {
+    "native_rmsnorm_slow": "torch.nn.RMSNorm 原生 kernel 仅 ~92 GB/s (实现的 reduce 低效), compile 后 ~0.9-1.0 TB/s; 建模以良实现 (compiled) 为准",
+    "matmul_4096": "4096^3 bf16 = 0.5109ms → 270 TFLOPS, 与 275 峰值一致",
+    "fa_prefill_scaling": "causal 恰为 full 的一半 (29.38 vs 57.24 @8192); 有效算力 ~150 TFLOPS"
+  }
+}
