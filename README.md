@@ -1,119 +1,79 @@
-# DeepStack artifact evaluation
+# TileSight
 
-This repository is the artifact for **“DeepStack: Facilitating Co-Design
-Exploration of 3D DRAM-Stacked Accelerators for Distributed LLM Inference.”**
-It provides a CPU-only workflow for rerunning the supported analytical
-experiments, checking their outputs, and rendering the paper-facing figures.
-After environment setup, reproduction does not require a GPU, model weights,
-an external simulator, or an external plotting workspace.
+A tile-centric analytical GPU performance model from cores to clusters. This
+repository is a source-visible snapshot of the TileSight modeling tool
+(`tilesight-release-2026-07`), supporting single-kernel latency, multi-level
+cache behavior, fused-kernel pipeline overlap, and distributed multi-GPU
+communication modeling without per-architecture training or profiling.
 
-## What the artifact provides
+TileSight treats the **tile** as the first-class modeling unit and adopts a
+prologue–steady–epilogue pipeline envelope applied recursively at every level.
+It composes three hierarchical levels with unified tile-based abstractions:
 
-- GPU kernel/operator and end-to-end LLM prefill/decode modeling with
-  DeepStack and TileSight.
-- Distributed-inference exploration across parallelism, collectives,
-  hierarchical NoC, and stacked-DRAM configurations.
-- Bandwidth, throughput, energy, thermal, capacity, and selected DSE
-  evaluations used by the paper.
-- Public NVIDIA and AMD GPU descriptions plus source-visible interfaces for
-  caller-defined architecture, DRAM, topology, per-level latency/bandwidth,
-  energy, and capacity inputs.
-- A standalone [DRAM bank oracle](src/deepstack/bank_oracle/README.md) with
-  constructive schedule checks, routing traces, and a self-contained
-  [HTML dashboard](src/deepstack/bank_oracle/visualization/artifacts/bank_wave_demo.html).
-- Automated environment checks, a short smoke run, a 15-stage reproduction,
-  independent result verification, and PNG/PDF plotting.
+- **Intra-tile** — each tile is decomposed into a per-pipeline resource vector
+  spanning compute (tensor cores / CUDA cores / SFU / TMEM), memory (SMEM /
+  L1.5 / L2 / DDR), and network.
+- **Inter-tile** — tiles are related through producer–consumer dependencies,
+  concurrent issue, and execution order; a topological-order search over the
+  tile-action DAG picks the best legal pipeline overlap, and a tile reuse
+  distance analysis with a stochastic distance cache model (SDCM) derives
+  multi-level cache hit rates.
+- **Cross-device** — cross-device execution is a placement case of the same
+  intra-tile abstraction: remote tensor accesses are inferred from
+  producer–consumer placement and decomposed into ordered stages of logical
+  exchanges, whose routed α–β cost populates the network entry of the per-tile
+  resource vector.
 
-## Figure preview
+See `docs/TileSight.pdf` for the full paper and `docs/` for source-level
+documentation.
 
-All 16 pre-rendered figure groups are available as PNG and PDF files under
-[`prebuilt/figures/`](prebuilt/figures/). They are provided only for browsing;
-the workflow and verifier never use them as inputs.
+## Documentation
 
-<p align="center">
-  <a href="prebuilt/figures/fig08_modeling_accuracy_h100.png"><img src="prebuilt/figures/fig08_modeling_accuracy_h100.png" width="24%" alt="H100 validation"></a>
-  <a href="prebuilt/figures/fig15_decode_pareto.png"><img src="prebuilt/figures/fig15_decode_pareto.png" width="24%" alt="Decode Pareto"></a>
-  <a href="prebuilt/figures/fig19_prefill_decode_dse_heatmaps.png"><img src="prebuilt/figures/fig19_prefill_decode_dse_heatmaps.png" width="24%" alt="DSE heatmaps"></a>
-  <a href="prebuilt/figures/fig21_noc_bw_latency_sensitivity.png"><img src="prebuilt/figures/fig21_noc_bw_latency_sensitivity.png" width="24%" alt="NoC sensitivity"></a>
-</p>
+| Document | Contents |
+|---|---|
+| `docs/TileSight.pdf` | The TileSight paper (arXiv:2607.22432). |
+| `docs/tilesight_analysis.md` | Mechanism-by-mechanism mapping from the paper's §3–4 to the source code, proving each equation and algorithm step is implemented. |
+| `docs/code_walkthrough.md` | A walkthrough of the code logic: package structure, data structures, call chains, and key algorithms per subpackage. |
 
-## Quick start
-
-The supported host is x86-64 Linux with glibc 2.29 or newer and Conda.
-`setup.sh` creates a CPython 3.11 environment and runs the environment doctor.
-For a GitHub clone, materialize the large DSE table with Git LFS first; this
-step is not needed for a fully materialized DOI archive.
-
-```bash
-git lfs pull
-./setup.sh
-conda run --no-capture-output -n deepstack-ae ./run.sh quick
-conda run --no-capture-output -n deepstack-ae \
-  ./run.sh reproduce --workers 32
-```
-
-The full run is intended for a host with about 32 CPU cores, 64 GiB RAM, and
-5 GiB free space; use a smaller `--workers` value when needed. Setup may
-access the network to install dependencies, while the model runs are
-repository-local.
-
-## Results
-
-The quick run writes to `results/quick/`. The full workflow writes generated
-CSVs, logs, manifests, verification summaries, and 16 PNG/PDF figure groups
-to `results/reproduce/`.
-
-Recheck or redraw an existing full result bundle with:
-
-```bash
-conda run --no-capture-output -n deepstack-ae \
-  ./verify.sh results/reproduce
-conda run --no-capture-output -n deepstack-ae \
-  ./run.sh plot --result-dir results/reproduce
-```
-
-The workflow reruns the analytical model. Bundled GPU measurements and
-ASTRA-Sim/NS-3 outputs are checksummed comparison inputs, not fresh hardware
-or simulator runs. It reports both the submitted-paper compatibility path and
-the current corrected path. Exact coverage, source versions, expected
-outputs, and per-result provenance are in the
-[reproducibility matrix](docs/result_matrix.md).
-
-## Repository layout
+## Package structure
 
 | Path | Contents |
 |---|---|
-| `ae/` | workflow, stage runners, verification, and plotting |
-| `src/deepstack/` | analytical/DSE model and bank oracle |
-| `src/tilesight/` | GPU kernel and distributed-performance model |
-| `data/`, `configs/` | checksummed references and fixed configurations |
-| `tests/` | functional and reusable-interface tests |
-| `docs/` | artifact appendix and detailed result/provenance matrix |
-| `prebuilt/figures/` | checked-in PNG/PDF previews; never verifier inputs |
-| `results/` | reviewer-generated outputs; not required as an input |
+| `src/tilesight/arch/` | Hardware abstraction (`Arch` base class) and 31 GPU/non-GPU profiles (NVIDIA, AMD, CGRA, TPU, …). |
+| `src/tilesight/fused_op_pipeline_wave/` | Paper-level modeling: resource vectors, occupancy, pipeline overlap, wave model, DAG overlap analysis. |
+| `src/tilesight/tile_cache/` | Multi-level cache hit-rate modeling (two-level L1.5+L2 SDCM cascade). |
+| `src/tilesight/distributed/` | Cross-device modeling: `DistributedTileMap`, `NetworkHierarchy`, collectives, distributed op composition. |
+| `src/tilesight/fused_op_dtype_wave/` | Empirical wave-version fused-op modeling (matmul/element/reduce). |
+| `src/tilesight/fused_op/`, `src/tilesight/fused_op_dtype/` | Earlier fused-op implementations. |
+| `src/tilesight/single_op/` | Single-operator models (matmul/conv/element/reduce). |
+| `src/tilesight/util/` | SDCM, reuse-distance flow sim, L2 hit-rate estimators, profilers. |
+| `src/tilesight/fusion_support/` | Operator fusion (register/SMEM, heterogeneous). |
+| `src/tilesight/tir_interface/` | TIR (TVM) interface for analyzing tile programs. |
+| `src/tilesight/welder_info_extract/`, `src/tilesight/welder_modeling_top/` | Welder compiler info extraction and top-level modeling. |
+| `src/tilesight/compare_with_ncu/` | Comparison with Nsight Compute profilers. |
+| `src/tilesight/onnx_model/` | ONNX model descriptions. |
 
-Caller-defined studies can use
-[`mosaic.arch.custom_profile`](src/deepstack/mosaic/arch/custom_profile.py),
-[`mosaic.noc.custom_profile`](src/deepstack/mosaic/noc/custom_profile.py),
-[`mosaic.cost.energy`](src/deepstack/mosaic/cost/energy.py), and
-[`DramDsePolicy`](src/deepstack/mosaic/dse_space/case_study_dram_layer/dram_layer_config.py).
+## Installation
 
-The complete reference area model and die-area breakdown are not distributed;
-the bundled reference interface returns only feasible SM capacity for covered
-configurations. Contact the authors for additional area-model coverage.
+```bash
+pip install -e .
+```
 
-## Documentation and licensing
+Core runtime dependencies: `numpy`, `scipy`, `networkx`, `pandas`, `torch`
+(CPU build). The `tir_interface/` subpackage additionally requires `tilelang`
+/`tvm` (optional; not imported by the core modeling path).
 
-The [artifact appendix](docs/artifact_appendix.pdf) is the compact reviewer
-guide. The archived artifact is identified by
-[DOI 10.5281/zenodo.21351389](https://doi.org/10.5281/zenodo.21351389), and
-citation metadata are in [CITATION.cff](CITATION.cff).
+> **Platform note.** The bundled `distributed/noc/_model_support.*.so` is a
+> Linux x86-64 CPython 3.11 extension. On other platforms, the prebuilt
+> reference NoC topology profiles are unavailable; custom topologies can still
+> be constructed via the source-visible `noc_topo.make_*` factories.
 
-> **Mixed-license artifact.** Source code, scripts, documentation, manifests,
-> and project data are licensed under Apache-2.0. Four bundled precompiled
-> model-support/capacity libraries are proprietary and licensed separately
-> under
-> [LicenseRef-DeepStack-AE-Binary-1.0](LICENSES/LicenseRef-DeepStack-AE-Binary-1.0.txt).
-> The repository as a whole is not Apache-2.0; see
-> [LICENSING.md](LICENSING.md) and
-> [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+## Licensing
+
+Mixed-license. Source code, scripts, and documentation are licensed under
+Apache-2.0. The bundled precompiled NoC support library
+(`src/tilesight/tilesight/distributed/noc/_model_support.*.so`) is proprietary
+and licensed separately under
+[`LicenseRef-DeepStack-AE-Binary-1.0`](LICENSES/LicenseRef-DeepStack-AE-Binary-1.0.txt).
+The repository as a whole is not Apache-2.0; see [`LICENSING.md`](LICENSING.md)
+and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
