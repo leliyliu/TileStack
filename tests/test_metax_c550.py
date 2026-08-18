@@ -208,6 +208,48 @@ class TestFlashAttentionModel:
         )
 
 
+class TestFusionGain:
+    """融合收益建模 vs 实测 (compiled 良实现公平基线)。"""
+
+    def test_residual_rmsnorm_serial_vs_measured(self, arch):
+        # 实测: add 0.0714 + rmsnorm 0.0742 串行 = 0.142 ms
+        from tilesight.fused_op_pipeline_wave.rmsnorm_pipeline_wave import (
+            model_residual_rmsnorm,
+        )
+        t = model_residual_rmsnorm(rows=4096, hidden=4096, arch=arch, fused=False)
+        assert abs(t - 0.142e-3) / 0.142e-3 < 0.15, f"serial {t*1e6:.1f}us vs 142us"
+
+    def test_residual_rmsnorm_fused_vs_measured(self, arch):
+        from tilesight.fused_op_pipeline_wave.rmsnorm_pipeline_wave import (
+            model_residual_rmsnorm,
+        )
+        t = model_residual_rmsnorm(rows=4096, hidden=4096, arch=arch, fused=True)
+        assert abs(t - 0.1069e-3) / 0.1069e-3 < 0.15, f"fused {t*1e6:.1f}us vs 106.9us"
+
+    def test_fusion_gain_ratio(self, arch):
+        # 实测收益比 0.142/0.1069 = 1.33x; 建模比误差 <=20%
+        from tilesight.fused_op_pipeline_wave.rmsnorm_pipeline_wave import (
+            model_residual_rmsnorm,
+        )
+        t_ser = model_residual_rmsnorm(4096, 4096, arch, fused=False)
+        t_fus = model_residual_rmsnorm(4096, 4096, arch, fused=True)
+        modeled_gain = t_ser / t_fus
+        assert abs(modeled_gain - 1.33) / 1.33 < 0.20
+
+    def test_matmul_rmsnorm_chain(self, arch):
+        # 4096^3 bf16 GEMM + RMSNorm: 实测良实现 ≈ 0.511 + 0.074 = 0.585ms
+        from tilesight.fused_op_pipeline_wave import calculate_matmul_pipeline_wave
+        from tilesight.fused_op_pipeline_wave.rmsnorm_pipeline_wave import model_rmsnorm
+        mm = calculate_matmul_pipeline_wave(
+            (4096, 4096, 4096), (128, 128, 32), (64, 64, 16), 3, arch,
+            {"in1": [1, 1, 1, 2], "in2": [1, 1, 1, 2], "out1": [0, 0, 1, 4]},
+            mma_type="wmma")
+        ln = model_rmsnorm(rows=4096, hidden=4096, arch=arch)
+        total = mm.total_latency + ln.total_latency
+        assert abs(total - 0.585e-3) / 0.585e-3 < 0.15, (
+            f"chain {total*1e3:.3f}ms vs 0.585ms")
+
+
 class TestMatmulModelSmoke:
     """端到端冒烟: 8192^3 FP16 GEMM 建模 vs 实测。
 

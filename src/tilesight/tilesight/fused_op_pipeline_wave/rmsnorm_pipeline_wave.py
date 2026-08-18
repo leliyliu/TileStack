@@ -11,7 +11,37 @@ C550 实测校准 (bench/results_c550_ops.json, 4 个测点一致):
 import math
 from collections import namedtuple
 
-RMSNormResult = namedtuple("RMSNormResult", "total_latency ddr_io ddr_util compute_time")
+RMSNormResult = namedtuple(
+    "RMSNormResult", "total_latency ddr_io ddr_util compute_time"
+)
+
+
+def model_elementwise(total_bytes, arch, reduce_mixed=False):
+    """纯 elementwise kernel 延迟 (add/copy 类)。
+
+    实测区分 (bench/results_c550_ops.json): 纯 elementwise (add 1.35 TB/s)
+    达 copy 级带宽 (x ddr_max_util); 含行规约的 kernel (RMSNorm 0.93 TB/s)
+    用 arch.elementwise_ddr_eff。
+    """
+    eff = getattr(arch, "elementwise_ddr_eff", 1.0) if reduce_mixed \
+        else getattr(arch, "ddr_max_util", 0.9)
+    return total_bytes / (arch.ddr_bandwidth * eff)
+
+
+def model_residual_rmsnorm(rows, hidden, arch, dtype_bytes=2, fused=True):
+    """residual add + RMSNorm: 融合 vs 未融合两 kernel 串行。
+
+    未融合: add (读 x + 读 res + 写 tmp) + rmsnorm (读 tmp + 写 out)
+            → 5 份流量, 中间张量落 DDR
+    融合  : 单 kernel 读 x + 读 res + 写 out → 3 份流量
+    实测 (muxi-01, compiled 良实现): 串行 0.142ms / 融合 0.1069ms = 1.33x
+    """
+    tensor_bytes = rows * hidden * dtype_bytes
+    if fused:
+        return model_rmsnorm(rows, hidden, arch, dtype_bytes, residual=True).total_latency
+    t_add = model_elementwise(tensor_bytes * 3, arch)
+    t_ln = model_rmsnorm(rows, hidden, arch, dtype_bytes).total_latency
+    return t_add + t_ln
 
 
 def model_rmsnorm(rows, hidden, arch, dtype_bytes=2, residual=False):
