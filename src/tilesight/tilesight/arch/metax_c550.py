@@ -101,6 +101,13 @@ class MXC550(Arch):
         # ~0.9-1.0 TB/s = 1430 x 0.65。GEMM/纯 copy 不受此因子影响。
         self.elementwise_ddr_eff = 0.65
 
+        # 🔬 校准 (bench/results_c550_ops.json, 6 测点): FA 有效 TC 算力系数。
+        # 由两端口径夹逼求解: eff=1.0 时模型低估 20-30%, eff=0.56 (实测
+        # FA/GEMM 峰值直比) 时高估 20-32% (GEMM 段含固定内存分量);
+        # 各测点线性交点一致收敛于 0.735-0.78, 取 0.75。
+        # 物理含义: online softmax + rescale + 非方 tile 的固有开销。
+        self.fa_tc_eff = 0.75
+
         # 注: L1.5 / TMEM 不存在 (l1_5_group_size=0, tmem_bandwidth=0,
         # 基类默认即为关闭); VL1 默认关闭且容量 32KB 过小, 不建层次。
 

@@ -354,8 +354,10 @@ def calculate_matmul_pipeline_wave(op_shape, tb_shape, wp_shape, stage_num, arch
     # ================================================================
     total_tiles = int(np.prod(spatial_grids))
 
+    # batch 维的 tile 与空间维 tile 一样参与全 SM round-robin 调度,
+    # 必须一并进入 wave 量化 (否则小 grid x 大 batch 会被串行化, 高估)
     total_latency, wave_info = compute_wave_adjusted_latency(
-        sm_latency, tiles_per_sm, total_tiles, arch,
+        sm_latency, tiles_per_sm, total_tiles * batch, arch,
         pipeline_detail=pipeline_detail, mma_type=mma_type,
         tile_res=tile_res, data_bytes=in1_level[-1],
         sm_count_override=effective_sm_count)
@@ -369,7 +371,7 @@ def calculate_matmul_pipeline_wave(op_shape, tb_shape, wp_shape, stage_num, arch
         tile_res, actual_tiles_per_sm, arch, data_bytes=in1_level[-1],
         sm_count=effective_sm_count, active_sms=actual_active_sms)
 
-    total_latency *= batch
+    # batch 已折入 total_tiles 参与 wave 调度, 不再串行相乘
 
     # ================================================================
     # Utilization 计算
@@ -539,10 +541,10 @@ def calculate_matmul_triton_swizzle_pipeline_wave(op_shape, tb_shape, wp_shape,
 
     total_tiles = int(np.prod(spatial_grids))
     total_latency, wave_info = compute_wave_adjusted_latency(
-        sm_latency, tiles_per_sm, total_tiles, arch,
+        sm_latency, tiles_per_sm, total_tiles * batch, arch,
         pipeline_detail=pipeline_detail,
         tile_res=tile_res, data_bytes=in1_level[-1])
-    total_latency *= batch
+    # batch 已折入 total_tiles 参与 wave 调度, 不再串行相乘
 
     # per_tile for reporting
     actual_active_sms = min(total_tiles, arch.sm_count)

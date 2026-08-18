@@ -4,6 +4,7 @@ from .pipeline_overlap import *
 from .wave_model import *
 from .matmul_pipeline_wave import *
 from .rmsnorm_pipeline_wave import *
+from .flash_attention_pipeline_wave import *
 from .elementwise_pipeline_wave import *
 from .reduce_pipeline_wave import *
 from .conv_pipeline_wave import *
