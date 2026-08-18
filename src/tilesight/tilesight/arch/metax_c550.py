@@ -96,6 +96,11 @@ class MXC550(Arch):
         self.l1_max_util = 0.9
         self.compute_max_util = 0.9
 
+        # 🔬 校准 (4 测点一致, bench/results_c550_ops.json): 良实现
+        # elementwise/reduce kernel (compiled RMSNorm 等) 有效带宽
+        # ~0.9-1.0 TB/s = 1430 x 0.65。GEMM/纯 copy 不受此因子影响。
+        self.elementwise_ddr_eff = 0.65
+
         # 注: L1.5 / TMEM 不存在 (l1_5_group_size=0, tmem_bandwidth=0,
         # 基类默认即为关闭); VL1 默认关闭且容量 32KB 过小, 不建层次。
 

@@ -137,6 +137,77 @@ class TestWavefrontSemantics:
         assert _compute_thread_overhead(w // 2, arch) == 2.0
 
 
+MEASURED_RMSNORM_MS = {
+    # bench/results_c550_ops.json: torch.compile 良实现 (单遍 smem 缓冲)
+    (4096, 4096): 0.0731,
+    (4096, 8192): 0.1374,
+    (16384, 4096): 0.2681,
+    (16384, 8192): 0.5181,
+}
+
+
+class TestRMSNormModel:
+    """RMSNorm 建模 vs 实测 (compiled 良实现), 误差 <=15%。"""
+
+    def test_rmsnorm_vs_measured(self, arch):
+        from tilesight.fused_op_pipeline_wave.rmsnorm_pipeline_wave import (
+            model_rmsnorm,
+        )
+        for (rows, hidden), measured_ms in MEASURED_RMSNORM_MS.items():
+            r = model_rmsnorm(rows=rows, hidden=hidden, arch=arch)
+            err = abs(r.total_latency - measured_ms * 1e-3) / (measured_ms * 1e-3)
+            assert err < 0.15, (
+                f"rows={rows} hidden={hidden}: modeled {r.total_latency*1e6:.1f}us "
+                f"vs measured {measured_ms*1e3:.1f}us, err {err:.1%}"
+            )
+
+    def test_residual_rmsnorm_vs_measured(self, arch):
+        # 融合 residual+RMSNorm 实测 0.1067 ms (IO: 读 2 份 + 写 1 份)
+        from tilesight.fused_op_pipeline_wave.rmsnorm_pipeline_wave import (
+            model_rmsnorm,
+        )
+        r = model_rmsnorm(rows=4096, hidden=4096, arch=arch, residual=True)
+        err = abs(r.total_latency - 0.1067e-3) / 0.1067e-3
+        assert err < 0.15, f"err {err:.1%}"
+
+    def test_native_rmsnorm_inefficient_flagged(self, arch):
+        # 原生 torch.nn.RMSNorm 0.731ms 远超带宽极限, 不应被模型匹配;
+        # 模型输出应接近带宽上限, 从而暴露实现的低效
+        from tilesight.fused_op_pipeline_wave.rmsnorm_pipeline_wave import (
+            model_rmsnorm,
+        )
+        r = model_rmsnorm(rows=4096, hidden=4096, arch=arch)
+        assert r.total_latency < 0.731e-3 / 3  # 模型上限应远低于差实现
+
+
+MEASURED_FA_PREFILL_MS = {
+    # bench/results_c550_ops.json: B=8, H=32, D=128, bf16
+    False: {2048: 3.4087, 4096: 13.7377, 8192: 57.2449},
+    True: {2048: 1.8919, 4096: 7.703, 8192: 29.3811},
+}
+
+
+class TestFlashAttentionModel:
+    """FA prefill 三段拆解建模 vs 实测, 误差 <=15%。"""
+
+    @pytest.mark.parametrize("causal", [False, True])
+    @pytest.mark.parametrize("S", [2048, 4096, 8192])
+    def test_prefill_vs_measured(self, arch, S, causal):
+        from tilesight.fused_op_pipeline_wave.flash_attention_pipeline_wave import (
+            model_flash_attention_prefill,
+        )
+        r = model_flash_attention_prefill(B=8, H=32, S=S, D=128, arch=arch,
+                                          causal=causal)
+        measured = MEASURED_FA_PREFILL_MS[causal][S] * 1e-3
+        err = abs(r.total_latency - measured) / measured
+        assert err < 0.15, (
+            f"S={S} causal={causal}: modeled {r.total_latency*1e3:.2f}ms "
+            f"vs measured {measured*1e3:.2f}ms, err {err:.1%}; "
+            f"segments qk={r.qk_time*1e3:.1f} sm={r.softmax_time*1e3:.1f} "
+            f"pv={r.pv_time*1e3:.1f}ms"
+        )
+
+
 class TestMatmulModelSmoke:
     """端到端冒烟: 8192^3 FP16 GEMM 建模 vs 实测。
 
