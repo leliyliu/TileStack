@@ -31,3 +31,4 @@ from .mi325x import *
 from .b200 import *
 from .rtx5090 import *
 from .b6000 import *
+from .metax_c550 import *
