@@ -185,7 +185,60 @@ PYTHONPATH=src/tilesight python -m pytest tests/test_metax_c550.py -v
 2. 纯 elementwise（add 1.35 TB/s）与含规约 kernel（0.93 TB/s）带宽效率显著不同，建模需区分
 3. FA 有效算力 150–161 TFLOPS 高度一致（6 测点），为 GEMM 峰值 275 的 56%（实测值），模型经 eff 校准后误差 ≤10.4%
 
-## 8. 遗留事项
+## 8. sglang 镜像对齐调查（第三轮，2026-08-19）
+
+针对问题：sglang metax 镜像（v0.5.12-deepseek-v4-rc1-maca.ai.3.7.1.110）内含沐曦定制 kernel，
+TileSight 能否与其对齐；若存在 gap，如何优化。结论：**模型已对齐；但 sglang 现有 kernel
+相对硬件能力仍有 26–36% 空间，我们给出的 triton kernel 实测端到端提速 1.26–1.36x**。
+
+### 8.1 关键发现：sglang 在沐曦上的真实分发路径
+
+1. **metax torch 上报 `is_cuda()=True`**（cu-bridge），sglang 的 `forward_musa` 是死代码，
+   实际走 `forward_cuda` → flashinfer/sgl_kernel（均为沐曦编译版）
+2. **容器内 .py 与运行时 .pyc 不一致**：磁盘 `layernorm.py` 是上游版（引用不存在的
+   `rms_norm`，强制重编译会 NameError），运行时 .pyc 为沐曦适配版（pyc mtime 晚于 .py）。
+   **在该容器打源码补丁必须基于运行时语义，不可直接删 pyc**
+3. 实际路径：无 residual → `flashinfer.rmsnorm`；带 residual → `sgl_kernel.fused_add_rmsnorm`（4 参原地）
+
+### 8.2 三方对比（4096×4096 bf16，单位 ms）
+
+| 实现 | 延迟 | 有效带宽 | 相对理论* |
+|---|---|---|---|
+| torch 原生 rms_norm | 0.7027 | 95 GB/s | 7% |
+| sglang 实际：flashinfer | 0.0777 | 864 GB/s | 67% |
+| torch.compile | 0.0664 | 1010 GB/s | 78% |
+| **本工作 triton（调优）** | **0.0559** | **1200 GB/s** | **93%** |
+| 理论（0.9×copy 带宽） | 0.0521 | 1287 GB/s | 100% |
+
+*理论 = 2 份流量（读1写1）/ (1430 GB/s × 0.9)；全部 5 个 shape 数据见
+`bench/results_c550_sglang_align.json`。fused 版（4 份流量）sgl_kernel 0.1063 vs
+triton 0.0989 ms。
+
+### 8.3 模型对齐结论
+
+TileSight 建模 72.2µs vs sglang 实际 flashinfer 77.5µs（**误差 6.8%，对齐**）。
+`elementwise_ddr_eff=0.65` 对应 sglang 现状（864/1430=0.60）；调优 triton 后可达 0.84——
+即「硬件能力口径」与「现状口径」的差，正是可优化空间。
+
+### 8.4 优化方案（已验证）
+
+调优要点（`bench/metax_rmsnorm_triton.py`）：每行一个 program、BLOCK=next_pow2(hidden)、
+num_warps=clamp(BLOCK/512,1,16)（4096→8 warp，适配 64 线程 wavefront）、fp32 累加。
+**限制：仅 2 的幂 hidden 有效**（非 2 幂需掩码反而更慢，必须回退 flashinfer）。
+
+经 sglang RMSNorm 类 monkey-patch 端到端验证：
+
+| shape | 无 residual | 带 residual | 数值 |
+|---|---|---|---|
+| 4096×4096 | 1.36x | 1.09x | ✓ |
+| 4096×8192 | 1.31x | 1.25x | ✓ |
+| 16384×8192 | 1.26x | 1.25x | ✓ |
+| 4096×5120（非2幂，回退） | 1.02x | 1.00x | ✓ |
+
+sglang 源码接入方式见 `bench/metax_rmsnorm_triton.py` 文件头注释（含 .pyc 不一致的
+注意事项与两处补丁点）。
+
+## 9. 遗留事项
 
 1. `ddr_wave_bytes`、`fp64`、`int8` 未经实测校准（已在字段注释中标注）
 2. L2 带宽为推算值；如需精确可用 L2 resident GEMM（K 小 M/N 大）微基准实测

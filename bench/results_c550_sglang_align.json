@@ -1,0 +1,30 @@
+{
+  "date": "2026-08-19",
+  "host": "muxi-01, container dsv4-d-50 (sglang v0.5.12 metax image)",
+  "context": "sglang 镜像 RMSNorm 路径对齐调查: TileSight 模型 vs sglang 实际 kernel vs 硬件能力",
+  "dispatch_discovery": {
+    "fact": "metax torch 上报 is_cuda()=True → sglang 走 forward_cuda (forward_musa 是死代码)",
+    "pyc_mismatch": "磁盘 layernorm.py 为上游版本 (引用不存在的 rms_norm, 强制重编译会 NameError); 运行时 .pyc 为沐曦适配版 (非residual→flashinfer.rmsnorm, residual→sgl_kernel.fused_add_rmsnorm 4参原地)",
+    "warning": "在该容器打源码补丁必须基于运行时语义, 不能直接删 pyc 重建"
+  },
+  "kernel_shootout_ms": {
+    "4096x4096": { "native": 0.7027, "flashinfer": 0.0777, "compiled": 0.0664, "triton_ours": 0.0559, "theoretical_2x@0.9util": 0.0521, "fused_sgl_kernel": 0.1063, "fused_triton_ours": 0.0989 },
+    "4096x8192": { "native": 1.3051, "flashinfer": 0.1439, "compiled": 0.1349, "triton_ours": 0.1135, "theoretical_2x@0.9util": 0.1043, "fused_sgl_kernel": 0.2363, "fused_triton_ours": 0.1907 },
+    "16384x4096": { "native": 2.554, "flashinfer": 0.2585, "compiled": 0.2499, "triton_ours": 0.2024, "theoretical_2x@0.9util": 0.2086, "fused_sgl_kernel": 0.375, "fused_triton_ours": 0.3683 },
+    "16384x8192": { "native": 5.0511, "flashinfer": 0.5353, "compiled": 0.5111, "triton_ours": 0.4272, "theoretical_2x@0.9util": 0.4171, "fused_sgl_kernel": 0.9064, "fused_triton_ours": 0.7245 },
+    "4096x5120_nonpow2": { "native": 0.8507, "flashinfer": 0.0912, "triton_ours": 0.1098, "note": "非2幂 hidden triton 版需掩码, 反而更慢 → 必须回退 flashinfer" }
+  },
+  "end_to_end_sglang_class": {
+    "4096x4096": { "no_residual_base": 0.0775, "no_residual_patched": 0.057, "speedup": 1.36, "residual_base": 0.1067, "residual_patched": 0.0981, "residual_speedup": 1.09 },
+    "4096x8192": { "no_residual_speedup": 1.31, "residual_speedup": 1.25 },
+    "16384x8192": { "no_residual_speedup": 1.26, "residual_speedup": 1.25 },
+    "4096x5120": { "no_residual_speedup": 1.02, "residual_speedup": 1.0, "note": "回退路径验证正确" },
+    "numerics": "全部 allclose(atol=2e-2) 通过 (bf16 输出容差)"
+  },
+  "model_alignment": {
+    "tilesight_model_4096x4096_us": 72.2,
+    "sglang_flashinfer_actual_us": 77.5,
+    "model_err": "6.8%",
+    "conclusion": "TileSight 模型与 sglang 实际 kernel 对齐 (误差 <7%); sglang kernel 相对硬件能力 (triton 调优后 0.84x copy 带宽) 尚有 26-36% 空间"
+  }
+}
