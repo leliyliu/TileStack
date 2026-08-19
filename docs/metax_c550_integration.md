@@ -238,7 +238,59 @@ num_warps=clamp(BLOCK/512,1,16)（4096→8 warp，适配 64 线程 wavefront）�
 sglang 源码接入方式见 `bench/metax_rmsnorm_triton.py` 文件头注释（含 .pyc 不一致的
 注意事项与两处补丁点）。
 
-## 9. 遗留事项
+## 9. 镜像集成部署 runbook（待 muxi-01 恢复后执行）
+
+> 2026-08-19 部署进行到一半时 muxi-01 失联（ssh/ping 均超时约 20 分钟，疑似宕机/维护）。
+> 交付物已固化在仓库，恢复后按以下步骤执行。
+
+### 9.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `bench/metax_rmsnorm_patch.py` | 补丁模块：.pth 启动钩子 + import hook，layernorm 加载后自动替换 rmsnorm/fused_add_rmsnorm；env `METAX_RMSNORM_PATCH=0` 可禁用（A/B 用）；不改 sglang 源文件，规避 .py/.pyc 不一致 |
+| `bench/eval_metax_rmsnorm_patch.py` | 有效性评估：生效确认 + 类级基准 + 复合层模拟 |
+
+### 9.2 部署步骤
+
+```bash
+# 1. 拷入容器 site-packages 并启用 .pth
+scp bench/metax_rmsnorm_patch.py muxi-01:/tmp/
+ssh muxi-01 'docker cp /tmp/metax_rmsnorm_patch.py \
+  dsv4-d-50:/opt/conda/lib/python3.10/site-packages/metax_rmsnorm_patch.py \
+  && docker exec dsv4-d-50 bash -c \
+  "echo import metax_rmsnorm_patch > /opt/conda/lib/python3.10/site-packages/metax_rmsnorm_patch.pth"'
+
+# 2. 验证生效（新进程，stderr 应打印 applied）
+ssh muxi-01 'docker exec dsv4-d-50 /opt/conda/bin/python -c \
+  "import sglang.srt.layers.layernorm as L; print(L._metax_rmsnorm_patched)"'
+
+# 3. A/B 评估
+scp bench/eval_metax_rmsnorm_patch.py muxi-01:/tmp/
+ssh muxi-01 'docker cp /tmp/eval_metax_rmsnorm_patch.py dsv4-d-50:/tmp/ \
+  && docker exec dsv4-d-50 /opt/conda/bin/python /tmp/eval_metax_rmsnorm.py'
+ssh muxi-01 'docker exec -e METAX_RMSNORM_PATCH=0 dsv4-d-50 \
+  /opt/conda/bin/python /tmp/eval_metax_rmsnorm.py'   # 基线
+
+# 4. 提交新镜像
+ssh muxi-01 'docker commit dsv4-d-50 \
+  metax-sglang:rmsnorm-opt-v0.5.12-maca3.7.1'
+# 参照 docker inspect dsv4-d-50 的 Devices/DeviceRequests 复制启动参数后:
+#   docker run --rm --device ... metax-sglang:rmsnorm-opt-... <评估脚本>
+
+# 5. （可选）保持原容器干净：移除 .pth（新镜像已含补丁）
+ssh muxi-01 'docker exec dsv4-d-50 rm \
+  /opt/conda/lib/python3.10/site-packages/metax_rmsnorm_patch{.py,.pth}'
+```
+
+### 9.3 有效性预期与判据
+
+- 类级：无 residual 1.26–1.36x，residual 1.09–1.25x（已验证的 monkey-patch 同机制）
+- 复合层（3 matmul + 2 fused norm，H=4096）：norm 占比 ~12%，预期层级收益 **1–4%**——
+  单 kernel 收益显著，但需诚实报告模型级放大有限；decode 小 batch 下 norm 占比更高，收益更大
+- 判据：`patch_active=True`、`numerics_ok=True` 全 shape、类级提速复现、
+  A/B 前后 composite 差值方向一致
+
+## 10. 遗留事项
 
 1. `ddr_wave_bytes`、`fp64`、`int8` 未经实测校准（已在字段注释中标注）
 2. L2 带宽为推算值；如需精确可用 L2 resident GEMM（K 小 M/N 大）微基准实测
