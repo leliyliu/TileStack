@@ -238,57 +238,89 @@ num_warps=clamp(BLOCK/512,1,16)（4096→8 warp，适配 64 线程 wavefront）�
 sglang 源码接入方式见 `bench/metax_rmsnorm_triton.py` 文件头注释（含 .pyc 不一致的
 注意事项与两处补丁点）。
 
-## 9. 镜像集成部署 runbook（待 muxi-01 恢复后执行）
+## 9. 镜像集成与有效性评估（已完成，2026-08-20）
 
-> 2026-08-19 部署进行到一半时 muxi-01 失联（ssh/ping 均超时约 20 分钟，疑似宕机/维护）。
-> 交付物已固化在仓库，恢复后按以下步骤执行。
+> 2026-08-19 部署中途 muxi-01 失联，恢复后于 08-20 完成部署、评估与镜像提交。
+> 过程中发现并修复一个部署问题：triton.jit 需要 `inspect.getsourcelines`，
+> exec 字符串定义的 kernel 会 `OSError: could not get source code`——kernel 必须
+> 放在真实源文件（`metax_rmsnorm_kernels.py`），补丁模块懒导入它。
 
-### 9.1 交付物
+### 9.1 实测评估结果（新镜像内 A/B）
+
+**类级**（`METAX_RMSNORM_PATCH=0` 基线 vs 启用，单位 ms）：
+
+| shape | 无 residual | 带 residual | 数值 |
+|---|---|---|---|
+| 4096×4096 | 0.0814→0.0568（**1.43x**） | 0.1072→0.0985（1.09x） | ✓ |
+| 4096×8192 | 0.1472→0.1135（1.30x） | 0.2385→0.1909（1.25x） | ✓ |
+| 16384×8192 | 0.5411→0.4283（1.26x） | 0.9108→0.7251（1.26x） | ✓ |
+| 4096×5120（非2幂回退） | 1.00x | 1.00x | ✓ |
+
+**复合 transformer 层**（3 matmul + 2 fused norm，H=4096）：
+
+| 场景 | 基线 | 补丁 | 收益 |
+|---|---|---|---|
+| prefill 4096 rows | 1.7451 | 1.7248 | +1.2% |
+| **decode 8 rows** | 0.1248 | 0.1174 | **+6.3%** |
+| 大 batch 16384 rows | 7.299 | 7.164 | +1.9% |
+
+结论：单 kernel 收益显著（最高 1.43x），模型层级收益如预期被稀释（1–2%），
+**decode 小 batch 场景收益最大（6.3%）**——此时 norm 在层时间中占比更高。
+
+### 9.2 镜像交付
+
+- 新镜像：`metax-sglang:rmsnorm-opt-v0.5.12-maca3.7.1`（基于 dsv4-d-50 commit，
+  sha256:ed10775...，19.1GB）
+- 已验证：新起容器（需 `--privileged --network host --ipc host`，与原容器同规格）
+  内补丁自动生效（`patched: True`）、GPU 可用、数值正确
+- 原 dsv4-d-50 容器已清理补丁文件并停回原状（Exited）
+
+### 9.3 交付物
 
 | 文件 | 作用 |
 |---|---|
-| `bench/metax_rmsnorm_patch.py` | 补丁模块：.pth 启动钩子 + import hook，layernorm 加载后自动替换 rmsnorm/fused_add_rmsnorm；env `METAX_RMSNORM_PATCH=0` 可禁用（A/B 用）；不改 sglang 源文件，规避 .py/.pyc 不一致 |
-| `bench/eval_metax_rmsnorm_patch.py` | 有效性评估：生效确认 + 类级基准 + 复合层模拟 |
+| `bench/metax_rmsnorm_kernels.py` | triton kernel（真实源文件，triton.jit 依赖源码） |
+| `bench/metax_rmsnorm_patch.py` | .pth 启动钩子 + import hook，layernorm 加载后自动替换 rmsnorm/fused_add_rmsnorm；env `METAX_RMSNORM_PATCH=0` 可禁用（A/B 用）；不改 sglang 源文件，规避 .py/.pyc 不一致 |
+| `bench/eval_metax_rmsnorm_patch.py` | 三层有效性评估：生效确认 + 类级基准 + 复合层模拟 |
 
-### 9.2 部署步骤
+### 9.4 部署步骤（已执行，供复现）
 
 ```bash
 # 1. 拷入容器 site-packages 并启用 .pth
-scp bench/metax_rmsnorm_patch.py muxi-01:/tmp/
-ssh muxi-01 'docker cp /tmp/metax_rmsnorm_patch.py \
-  dsv4-d-50:/opt/conda/lib/python3.10/site-packages/metax_rmsnorm_patch.py \
+scp bench/metax_rmsnorm_{patch,kernels}.py muxi-01:/tmp/
+ssh muxi-01 'for f in patch kernels; do docker cp /tmp/metax_rmsnorm_$f.py \
+  dsv4-d-50:/opt/conda/lib/python3.10/site-packages/metax_rmsnorm_$f.py; done \
   && docker exec dsv4-d-50 bash -c \
   "echo import metax_rmsnorm_patch > /opt/conda/lib/python3.10/site-packages/metax_rmsnorm_patch.pth"'
 
-# 2. 验证生效（新进程，stderr 应打印 applied）
+# 2. 验证生效（stderr 应打印 applied; patched: True）
 ssh muxi-01 'docker exec dsv4-d-50 /opt/conda/bin/python -c \
-  "import sglang.srt.layers.layernorm as L; print(L._metax_rmsnorm_patched)"'
+  "import sglang.srt.layers.layernorm as L; print(getattr(L, \"_metax_rmsnorm_patched\", False))"'
 
-# 3. A/B 评估
+# 3. A/B 评估 (输出含启动 banner, 解析时跳到首个 '{')
 scp bench/eval_metax_rmsnorm_patch.py muxi-01:/tmp/
 ssh muxi-01 'docker cp /tmp/eval_metax_rmsnorm_patch.py dsv4-d-50:/tmp/ \
-  && docker exec dsv4-d-50 /opt/conda/bin/python /tmp/eval_metax_rmsnorm.py'
-ssh muxi-01 'docker exec -e METAX_RMSNORM_PATCH=0 dsv4-d-50 \
-  /opt/conda/bin/python /tmp/eval_metax_rmsnorm.py'   # 基线
+  && docker exec dsv4-d-50 bash -c \
+  "/opt/conda/bin/python /tmp/eval_metax_rmsnorm_patch.py > /tmp/on.json 2>/dev/null; \
+   METAX_RMSNORM_PATCH=0 /opt/conda/bin/python /tmp/eval_metax_rmsnorm_patch.py > /tmp/off.json 2>/dev/null"'
 
 # 4. 提交新镜像
-ssh muxi-01 'docker commit dsv4-d-50 \
-  metax-sglang:rmsnorm-opt-v0.5.12-maca3.7.1'
-# 参照 docker inspect dsv4-d-50 的 Devices/DeviceRequests 复制启动参数后:
-#   docker run --rm --device ... metax-sglang:rmsnorm-opt-... <评估脚本>
+ssh muxi-01 'docker commit dsv4-d-50 metax-sglang:rmsnorm-opt-v0.5.12-maca3.7.1'
 
-# 5. （可选）保持原容器干净：移除 .pth（新镜像已含补丁）
+# 5. 新容器验证 (注意原容器是 --privileged + host 网络/IPC)
+ssh muxi-01 'docker run --rm --privileged --network host --ipc host \
+  metax-sglang:rmsnorm-opt-v0.5.12-maca3.7.1 <验证脚本>'
+
+# 6. 恢复原容器干净状态
 ssh muxi-01 'docker exec dsv4-d-50 rm \
-  /opt/conda/lib/python3.10/site-packages/metax_rmsnorm_patch{.py,.pth}'
+  /opt/conda/lib/python3.10/site-packages/metax_rmsnorm_patch{.py,.pth} \
+  /opt/conda/lib/python3.10/site-packages/metax_rmsnorm_kernels.py \
+  && docker stop dsv4-d-50'
 ```
 
-### 9.3 有效性预期与判据
-
-- 类级：无 residual 1.26–1.36x，residual 1.09–1.25x（已验证的 monkey-patch 同机制）
-- 复合层（3 matmul + 2 fused norm，H=4096）：norm 占比 ~12%，预期层级收益 **1–4%**——
-  单 kernel 收益显著，但需诚实报告模型级放大有限；decode 小 batch 下 norm 占比更高，收益更大
-- 判据：`patch_active=True`、`numerics_ok=True` 全 shape、类级提速复现、
-  A/B 前后 composite 差值方向一致
+**部署踩坑记录**：① triton.jit 不能用 exec 字符串定义（见本节开头）；
+② `docker exec ... > file` 的重定向发生在宿主 shell，需用 `bash -c` 包裹；
+③ 该宿主 GPU 容器需 `--privileged` 才能看到设备（dsv4-d-50 即如此启动）。
 
 ## 10. 遗留事项
 
